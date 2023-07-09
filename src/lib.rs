@@ -83,6 +83,117 @@ impl RequestArgs {
 }
 
 #[pyfunction]
+#[pyo3(signature = (principal, action, resources, context_json, policies_str, entities_str, schema_str=None, verbose=false,))]
+fn is_authorized_batch(principal: String, action: String, resources: Vec<String>, context_json: String,
+    policies_str: String,
+    entities_str: String,
+    schema_str: Option<String>,
+    verbose: Option<bool>)
+    -> PyResult<String> {
+    let verbose = verbose.unwrap_or(false);
+    let mut authz_answers:Vec<AuthzResponse> = vec![];
+
+    let mut request_args: RequestArgs = RequestArgs {
+        principal: Some(principal.clone()),
+        action: Some(action.clone()),
+        resource: None,
+        context_json: Some(context_json.clone()),
+    };
+
+    let mut errs:Vec<Error> = vec![];
+
+    let policies = match PolicySet::from_str(&policies_str) {
+        Ok(pset) => pset,
+        Err(e) => {
+            errs.push(e.into());
+            PolicySet::new()
+        }
+    };
+
+    let schema: Option<Schema> = match &schema_str {
+        None => None,
+        Some(schema_src) => {
+            match Schema::from_str(&schema_src) {
+                Ok(schema) => Some(schema),
+                Err(e) => {
+                    errs.push(e.into());
+                    None
+                }
+            }
+        }
+    };
+
+    let entities = match load_entities(entities_str, schema.as_ref()) {
+        Ok(entities) => entities,
+        Err(e) => {
+            errs.push(e);
+            Entities::empty()
+        }
+    };
+
+    // load_actions_from_schema merges the "real" entities with the
+    // action entities.
+    let entities = match load_actions_from_schema(entities, &schema) {
+        Ok(entities) => entities,
+        Err(e) => {
+            errs.push(e);
+            Entities::empty()
+        }
+    };
+
+    if !errs.is_empty() {
+        return Err(to_pyerr(&errs))
+    }
+
+    let authorizer = Authorizer::new();
+
+    resources.iter().for_each(|resource| {
+        if verbose {
+            println!("resource: {}", resource)
+        }
+
+        request_args.resource = Some(resource.to_string());
+
+        let request = match request_args.get_request(schema.as_ref()) {
+            Ok(q) => Some(q),
+            Err(e) => {
+                errs.push(e.context("failed to parse schema from request")); // what does this mean?
+                None
+            }
+        };
+
+        let real_request = request.expect("if no errors we should have a valid request");
+
+        let auth_start = Instant::now();
+        let response = authorizer.is_authorized(&real_request, &policies, &entities);
+        let auth_dur = auth_start.elapsed();
+        let metrics = HashMap::from([
+            (String::from("authz_duration_micros"), auth_dur.as_micros())
+        ]);
+
+        let authz_response = AuthzResponse::new(response, metrics);
+
+        if verbose {
+            println!("authz_response = {:?}", authz_response)
+        }
+
+        authz_answers.push(authz_response);
+    });
+
+    if errs.is_empty() {
+        let to_json_str_result = serde_json::to_string(&authz_answers);
+        match to_json_str_result {
+            Ok(json_str) => { Ok(json_str) },
+            Err(err) => {
+                Err(to_pyerr(&Vec::from([err])))
+            },
+        }
+    } else {
+        Err(to_pyerr(&errs))
+    }
+}
+
+#[pyfunction]
 #[pyo3(signature = (request, policies, entities, schema=None, verbose=false,))]
 fn is_authorized(request: &PyDict,
                  policies: String,
@@ -299,6 +410,7 @@ fn load_actions_from_schema(entities: Entities, schema: &Option<Schema>) -> Resu
 fn _internal(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(echo, m)?)?;
     m.add_function(wrap_pyfunction!(is_authorized, m)?)?;
+    m.add_function(wrap_pyfunction!(is_authorized_batch, m)?)?;
     m.add_function(wrap_pyfunction!(format_policies, m)?)?;
     Ok(())
 }

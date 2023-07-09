@@ -111,3 +111,20 @@ def format_policies(policies: str,
     :raises ValueError: if the input policies cannot be parsed
     """
     return _internal.format_policies(policies, line_width, indent_width)
+
+def is_authorized_batch(principal: str,
+                        action: str,
+                        resources: List[str],
+                        context: dict,
+                        policies: str,
+                        entities: Union[List[dict], None] = None,
+                        schema: Union[str, None] = None,
+                        verbose: bool = False):
+    return json.loads(_internal.is_authorized_batch(principal,
+                                         action,
+                                         resources,
+                                         json.dumps(context),
+                                         policies,
+                                         json.dumps(entities or []),
+                                         schema,
+                                         verbose))
